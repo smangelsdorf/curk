@@ -38,6 +38,8 @@
     (st/store-client id (merge
                           (select-keys client-info [:address])
                           {:server (cfg/server-name)
+                           :channel channel
+                           :channels #{}
                            :hops 0
                            :away false}))
     (receive-all channel #(message-handler channel client-info context %))))

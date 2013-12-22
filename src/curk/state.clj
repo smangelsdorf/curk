@@ -11,6 +11,8 @@
 
 (defn now [] (clj-time.format/unparse date-format (clj-time.local/local-now)))
 
+(defn unix-now [] (do (int (/ (clj-time.coerce/to-long (clj-time.local/local-now)) 1000))))
+
 (defn thread-id []
   (let [thr (Thread/currentThread)]
     (clojure.string/join [\[ (.getId thr) \: (.getName thr) \]])))
@@ -25,7 +27,7 @@
   (dosync (alter clients update-in (cons id k) v)))
 
 (defn new-channel [chan]
-  (let [now (do (int (/ (clj-time.coerce/to-long (clj-time.local/local-now)) 1000)))]
+  (let [now (unix-now)]
     {:name chan
      :topic nil
      :modes #{\n \t}
@@ -42,14 +44,22 @@
            (fn [record]
              (let [record (if record record (new-channel chan))]
                (update-in record [:members]
-                          #(conj % (new-channel-member id record))))))))
+                          #(conj % (new-channel-member id record))))))
+    (alter clients update-in [id :channels]
+           (fn [existing] (conj existing chan)))))
 
 (defn part-channel [id chan]
   (dosync
     (alter channels update-in [chan :members]
            (fn [members] (filter #(not= id (:id %)) members)))
     (alter channels update-in [chan]
-           (fn [record] (if (empty? (:members record)) nil record)))))
+           (fn [record] (if (empty? (:members record)) nil record)))
+    (alter clients update-in [id :channels]
+           (fn [existing] (disj existing chan)))))
+
+(defn update-channel [chan k v]
+  (dosync
+    (alter channels update-in (cons chan k) v)))
 
 (def channel-record
   #(get @channels %))

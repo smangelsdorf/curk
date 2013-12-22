@@ -16,14 +16,12 @@
     (if nick nick "*")))
 
 (defn send-message
-  ([context source command args] (send-message context source command args nil))
-  ([{:keys [channel] :as context} source command args trail]
+  ([target source command args] (send-message target source command args nil))
+  ([{:keys [channel] :as target} source command args trail]
    (let [source-prefix (s/join [\: source])
          reply [source-prefix command]
-         reply (if (empty? args) reply (apply conj reply args))
-         reply (if (nil? trail) reply
-                 (conj reply (if (.contains trail " ")
-                               (s/join [\: trail]) trail)))
+         reply (into [] (concat reply args))
+         reply (if (nil? trail) reply (conj reply (s/join [\: trail])))
          text-reply (s/join " " reply)]
      (println ">>>" text-reply)
      (lam/enqueue channel text-reply))))
@@ -160,29 +158,62 @@
     (who-chan context [c match]))
   (send-numeric context "315" [] "End of /WHO list."))
 
+(defn do-users [chan f]
+  (let [{:keys [members] :as record} (st/channel-record chan)]
+    (doseq [m members]
+      (let [id (:id m)
+            user (st/user-record id)]
+        (f record user id)))))
+
 (defn topic [context [c chan text]]
   (let [record (st/channel-record chan)
         current (:topic record)]
     (if text
-      (println "new topic:" text)
+      (let [prefix (user-prefix context)]
+        (send-message context prefix "TOPIC" [chan] text)
+        (st/update-channel chan [:topic] (fn [_] {:text text
+                                                  :time (st/unix-now)
+                                                  :by prefix})))
       (if current
-        (send-numeric context "332" [chan] current)
+        (let [{:keys [text time by]} current]
+          (send-numeric context "332" [chan] text)
+          (send-numeric context "333" [chan by time]))
         (send-numeric context "331" [chan] "No topic is set")))))
 
 (defn join [{:keys [id] :as context} [c chan]]
-  (let [{:keys [nick user address] :as record} (st/client-record id)
-        prefix (s/join [nick \! user \@ address])]
+  (let [prefix (user-prefix context)]
     (st/join-channel id chan)
-    (send-message context prefix "JOIN" [chan])
+    (do-users chan (fn [_ u _] (send-message u prefix "JOIN" [chan])))
     (topic context ["TOPIC" chan])
     (mode-numeric context chan)
     (names context ["NAMES" chan])
     (println prefix "Join:" chan)))
 
-(defn part [{:keys [id] :as context} [c chan]]
+(defn part [{:keys [id] :as context} [c chan reason]]
   (let [prefix (user-prefix context)]
-    (st/part-channel id chan)
-    (send-message context prefix "PART" [chan])))
+    (do-users chan (fn [_ u _] (send-message u prefix "PART" [chan] reason)))
+    (st/part-channel id chan)))
+
+(defn terminate [{:keys [id channels] :as context} message]
+  (let [user (st/user-record id)
+        prefix (user-prefix context)]
+    (doseq [chan (:channels user)]
+      (st/part-channel id chan)
+      (do-users chan (fn [_ u _] (send-message u prefix "QUIT" [] message))))))
+
+(defn quit [{:keys [id] :as context} [c message]]
+  (terminate context (s/join ["Quit: " message]))
+  (println "Quit:" id message))
+
+(defn privmsg-chan [context chan message]
+  (let [prefix (user-prefix context)]
+    (do-users chan (fn [_ u id] (if (not= (:id context) id)
+                                 (send-message u prefix "PRIVMSG"
+                                               [chan] message))))))
+
+(defn privmsg [context [c dest message]]
+  (if (= \# (first dest))
+    (privmsg-chan context dest message)))
 
 (defn unknown-command [context [c & args]]
   (println "Got unknown command:" c))
@@ -197,7 +228,9 @@
     "PING" ping
     "JOIN" join
     "PART" part
+    "QUIT" quit
     "MODE" mode
+    "PRIVMSG" privmsg
     "NAMES" names
     "WHO" who
     "TOPIC" topic
