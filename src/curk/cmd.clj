@@ -179,6 +179,11 @@
     (names context ["NAMES" chan])
     (println prefix "Join:" chan)))
 
+(defn part [{:keys [id] :as context} [c chan]]
+  (let [prefix (user-prefix context)]
+    (st/part-channel id chan)
+    (send-message context prefix "PART" [chan])))
+
 (defn unknown-command [context [c & args]]
   (println "Got unknown command:" c))
 
@@ -191,6 +196,7 @@
     "MOTD" motd
     "PING" ping
     "JOIN" join
+    "PART" part
     "MODE" mode
     "NAMES" names
     "WHO" who

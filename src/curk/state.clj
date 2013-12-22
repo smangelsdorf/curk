@@ -44,6 +44,13 @@
                (update-in record [:members]
                           #(conj % (new-channel-member id record))))))))
 
+(defn part-channel [id chan]
+  (dosync
+    (alter channels update-in [chan :members]
+           (fn [members] (filter #(not= id (:id %)) members)))
+    (alter channels update-in [chan]
+           (fn [record] (if (empty? (:members record)) nil record)))))
+
 (def channel-record
   #(get @channels %))
 
