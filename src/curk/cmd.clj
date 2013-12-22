@@ -15,57 +15,59 @@
   (let [nick (:nick (st/client-record id))]
     (if nick nick "*")))
 
-(defn send-message [{:keys [id channel] :as context} source command args]
-  (let [trail (last args)
-        args (butlast args)
-        source-prefix (s/join [\: source])
-        reply [source-prefix command]
-        reply (if (empty? args) reply (apply conj reply args))
-        reply (conj reply (if (.contains trail " ") (s/join [\: trail]) trail))
-        text-reply (s/join " " reply)]
-    (println ">>>" text-reply)
-    (lam/enqueue channel text-reply)))
+(defn send-message
+  ([context source command args] (send-message context source command args nil))
+  ([{:keys [channel] :as context} source command args trail]
+   (let [source-prefix (s/join [\: source])
+         reply [source-prefix command]
+         reply (if (empty? args) reply (apply conj reply args))
+         reply (if (nil? trail) reply
+                 (conj reply (if (.contains trail " ")
+                               (s/join [\: trail]) trail)))
+         text-reply (s/join " " reply)]
+     (println ">>>" text-reply)
+     (lam/enqueue channel text-reply))))
 
-(defn send-numeric [{:keys [id] :as context} numeric args]
-  (send-message context (cfg/server-name) numeric (apply conj [(nick-of id)] args)))
+(defn send-numeric
+  ([context numeric args] (send-numeric context numeric args nil))
+  ([{:keys [id] :as context} numeric args trail]
+   (let [args (into [] (concat [(nick-of id)] args))]
+     (send-message context (cfg/server-name) numeric args trail))))
 
 (defn lusers [context args]
   (let [users (st/user-count)
         clients (st/client-count)
         max-users (st/max-user-count)
         max-clients (st/max-client-count)]
-    (send-numeric context "251" [(s/join ["There are "
-                                          users " users and "
-                                          (st/invisible-count) " invisible on "
-                                          (st/server-count) " server(s)"])])
-    (send-numeric context "252" [(str (st/ircop-count)) "IRC Operators online"])
-    (send-numeric context "253" [(str (st/unknown-count)) "unknown connection(s)"])
-    (send-numeric context "254" [(str (st/channel-count)) "channels formed"])
-    (send-numeric context "255" [(s/join ["I have "
-                                          clients " clients and "
-                                          (st/server-connection-count) " servers"])])
-    (send-numeric context "265" [users max-clients
-                                 (s/join ["Current local users " clients
-                                          ", max " max-clients])])
-    (send-numeric context "266" [users max-users
-                                 (s/join ["Current global users " users
-                                          ", max " max-users])])
-    (send-numeric context "250" [(s/join ["Highest connection count: "
-                                          (st/max-connection-count) " ("
-                                          max-clients " clients) ("
-                                          (st/total-connection-count)
-                                          " connections received)"])])))
+    (send-numeric context "251" [] (s/join ["There are "
+                                            users " users and "
+                                            (st/invisible-count) " invisible on "
+                                            (st/server-count) " server(s)"]))
+    (send-numeric context "252" [(str (st/ircop-count))] "IRC Operators online")
+    (send-numeric context "253" [(str (st/unknown-count))] "unknown connection(s)")
+    (send-numeric context "254" [(str (st/channel-count))] "channels formed")
+    (send-numeric context "255" []
+                  (s/join ["I have " clients " clients and "
+                           (st/server-connection-count) " servers"]))
+    (send-numeric context "265" [users max-clients]
+                  (s/join ["Current local users " clients ", max " max-clients]))
+    (send-numeric context "266" [users max-users]
+                  (s/join ["Current global users " users ", max " max-users]))
+    (send-numeric context "250" []
+                  (s/join ["Highest connection count: " (st/max-connection-count)
+                           " (" max-clients " clients) ("
+                           (st/total-connection-count) " connections received)"]))))
 
 (defn motd [context args]
-  (doall (map #(send-numeric context "372" [(s/join ["- " %])]) (cfg/motd-lines)))
-  (send-numeric context "376" ["End of /MOTD command."]))
+  (doall (map #(send-numeric context "372" [] (s/join ["- " %])) (cfg/motd-lines)))
+  (send-numeric context "376" [] "End of /MOTD command."))
 
 (defn register [{:keys [id] :as context}]
   (let [identifier (user-prefix context)
-        welcome [(s/join ["Welcome to the Internet Relay Network " identifier])]
-        server-id [(s/join ["Your host is " (cfg/server-name)
-                           " running " (cfg/version)])]
-        start-time [(s/join ["This server was created " (cfg/startup-time)])]
+        welcome (s/join ["Welcome to the Internet Relay Network " identifier])
+        server-id (s/join ["Your host is " (cfg/server-name)
+                           " running " (cfg/version)])
+        start-time (s/join ["This server was created " (cfg/startup-time)])
         server-info [(cfg/server-name) (cfg/version) "i" "biklmnpst"]
         features ["CHANTYPES=#"
                   "CHANMODES=b,k,l,imnpst"
@@ -76,13 +78,12 @@
                   "NETWORK=curknet"
                   "CHARSET=utf-8"
                   "NICKLEN=32"
-                  "CHANNELLEN=50"
-                  "are supported by this server"]]
-    (send-numeric context "001" welcome)
-    (send-numeric context "002" server-id)
-    (send-numeric context "003" start-time)
+                  "CHANNELLEN=50"]]
+    (send-numeric context "001" [] welcome)
+    (send-numeric context "002" [] server-id)
+    (send-numeric context "003" [] start-time)
     (send-numeric context "004" server-info)
-    (send-numeric context "005" features)
+    (send-numeric context "005" features "are supported by this server")
     (lusers context ["LUSERS"])
     (motd context ["MOTD"])
     (st/update-client id [:registered] (fn [_] true))))
@@ -107,13 +108,13 @@
   (println "Quit:" message))
 
 (defn ping [{:keys [channel] :as context} [c tag]]
-  (send-message context (cfg/server-name) "PONG" [(cfg/server-name) tag]))
+  (send-message context (cfg/server-name) "PONG" [(cfg/server-name)] tag))
 
 (defn mode-numeric [context chan]
   (let [record (st/channel-record chan)
         modes (:modes record)
         mode-string (s/join (cons \+ modes))]
-    (send-numeric context "324" [chan mode-string])
+    (send-numeric context "324" [chan] mode-string)
     (send-numeric context "329" [chan (str (:created record))])))
 
 (defn mode [{:keys [id] :as context} [c chan modes & args]]
@@ -130,22 +131,23 @@
 (defn names [context [c chan]]
   (let [record (st/channel-record chan)]
     (if (nil? record)
-      (send-numeric context "403" [chan "No such channel"])
+      (send-numeric context "403" [chan] "No such channel")
       (let [memberships (:members record)
             membership-string-parts (map (juxt (comp mode-char :modes)
                                                (comp nick-of :id))
                                          memberships)
             members (s/join " " (map s/join membership-string-parts))]
-        (send-numeric context "353" ["=" chan members])
-        (send-numeric context "366" ["End of /NAMES list."])))))
+        (send-numeric context "353" ["=" chan] members)
+        (send-numeric context "366" [] "End of /NAMES list.")))))
 
 (defn send-who-response [context chan membership]
   (let [{:keys [nick user address server
                 away hops real]} (st/user-record (:id membership))
         status (s/join [(if away \G \H)
                         (mode-char (:modes membership))])]
-        (send-numeric context "352" [chan user address server nick status
-                                     (s/join " " [hops real])])))
+    (send-numeric context "352"
+                  [chan user address server nick status]
+                  (s/join " " [hops real]))))
 
 (defn who-chan [context [c chan]]
   (let [record (st/channel-record chan)]
@@ -156,7 +158,7 @@
 (defn who [context [c match]]
   (if (= \# (first match))
     (who-chan context [c match]))
-  (send-numeric context "315" ["End of /WHO list."]))
+  (send-numeric context "315" [] "End of /WHO list."))
 
 (defn topic [context [c chan text]]
   (let [record (st/channel-record chan)
@@ -164,10 +166,10 @@
     (if text
       (println "new topic:" text)
       (if current
-        (send-numeric context "332" [chan current])
-        (send-numeric context "331" [chan "No topic is set"])))))
+        (send-numeric context "332" [chan] current)
+        (send-numeric context "331" [chan] "No topic is set")))))
 
-(defn cmd-join [{:keys [id] :as context} [c chan]]
+(defn join [{:keys [id] :as context} [c chan]]
   (let [{:keys [nick user address] :as record} (st/client-record id)
         prefix (s/join [nick \! user \@ address])]
     (st/join-channel id chan)
@@ -188,7 +190,7 @@
     "LUSERS" lusers
     "MOTD" motd
     "PING" ping
-    "JOIN" cmd-join
+    "JOIN" join
     "MODE" mode
     "NAMES" names
     "WHO" who
