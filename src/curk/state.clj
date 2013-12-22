@@ -1,8 +1,11 @@
 (ns curk.state)
 
+(use 'curk.state.internal)
+
 (require 'clj-time.core
          'clj-time.format
-         'clj-time.local)
+         'clj-time.local
+         'clj-time.coerce)
 
 (def date-format (clj-time.format/formatters :mysql))
 
@@ -15,35 +18,39 @@
 (defn log [& message-parts]
   (apply println (now) (thread-id) message-parts))
 
-(def clients (ref {}))
-
 (defn store-client [id content]
   (dosync (alter clients assoc id content)))
 
 (defn update-client [id k v]
   (dosync (alter clients update-in (cons id k) v)))
 
-(def channels (ref {}))
-
 (defn new-channel [chan]
-  #{:name chan
-    :topic ""
-    :modes #{\n \t}
-    :members #{}})
+  (let [now (do (int (/ (clj-time.coerce/to-long (clj-time.local/local-now)) 1000)))]
+    {:name chan
+     :topic nil
+     :modes #{\n \t}
+     :members #{}
+     :created now}))
 
 (defn new-channel-member [id record]
-  #{:id id
-    :modes (if (empty? (:members record)) #{\o} #{})})
+  {:id id
+   :modes (if (empty? (:members record)) #{\o} #{})})
 
 (defn join-channel [id chan]
   (dosync
     (alter channels update-in [chan]
-           #(if (not %) (new-channel chan)))
-    (alter channels update-in [chan :members]
-           #(conj % (new-channel-member id %)))))
+           (fn [record]
+             (let [record (if record record (new-channel chan))]
+               (update-in record [:members]
+                          #(conj % (new-channel-member id record))))))))
+
+(def channel-record
+  #(get @channels %))
 
 (def client-record
   #(get @clients %))
+
+(def user-record client-record)
 
 (defn client-count [] (count @clients))
 
@@ -67,7 +74,7 @@
 
 (defn max-connection-count [] (client-count))
 
-(def client-id (ref 0))
+(defn total-connection-count [] @client-id)
 
 (defn new-client-id [client-info]
   (dosync (alter client-id inc)))

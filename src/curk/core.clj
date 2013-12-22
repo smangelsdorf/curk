@@ -28,7 +28,6 @@
   (let [message (strip-prefix message)
         command (split-command message)
         handler (cmd/handler-for command)]
-    (st/log (get context :id) message)
     (handler context command)))
 
 (defn client-handler [channel client-info]
@@ -36,9 +35,13 @@
         context {:id id
                  :channel channel
                  :client-info client-info}]
-    (st/store-client id (select-keys client-info [:address]))
+    (st/store-client id (merge
+                          (select-keys client-info [:address])
+                          {:server (cfg/server-name)
+                           :hops 0
+                           :away false}))
     (receive-all channel #(message-handler channel client-info context %))))
 
 (defn start [& args]
   (start-tcp-server client-handler {:port (cfg/port)
-                                    :frame (string :utf-8 :delimiters ["\r\n" "\n"])}))
+                                    :frame (string :utf-8 :delimiters ["\r\n"])}))

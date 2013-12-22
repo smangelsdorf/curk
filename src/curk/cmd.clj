@@ -1,28 +1,33 @@
 (ns curk.cmd)
 
-(use 'lamina.core)
-
-(require '[clojure.string :as s]
+(require '[lamina.core :as lam]
+         '[clojure.string :as s]
          '[curk.config :as cfg]
          '[curk.state :as st])
 
 (defn server-prefix [] (s/join [\: (cfg/server-name)]))
 
+(defn user-prefix [{:keys [id] :as context}]
+  (let [{:keys [nick user address] :as record} (st/client-record id)]
+    (s/join [nick \! user \@ address])))
+
 (defn nick-of [id]
   (let [nick (:nick (st/client-record id))]
     (if nick nick "*")))
 
-(defn send-message [{:keys [id channel] :as context} source command target args]
+(defn send-message [{:keys [id channel] :as context} source command args]
   (let [trail (last args)
         args (butlast args)
         source-prefix (s/join [\: source])
-        reply [source-prefix command target]
+        reply [source-prefix command]
         reply (if (empty? args) reply (apply conj reply args))
-        reply (conj reply (if (.contains trail " ") (s/join [\: trail]) trail))]
-    (enqueue channel (s/join " " reply))))
+        reply (conj reply (if (.contains trail " ") (s/join [\: trail]) trail))
+        text-reply (s/join " " reply)]
+    (println ">>>" text-reply)
+    (lam/enqueue channel text-reply)))
 
 (defn send-numeric [{:keys [id] :as context} numeric args]
-  (send-message context (cfg/server-name) numeric (nick-of id) args))
+  (send-message context (cfg/server-name) numeric (apply conj [(nick-of id)] args)))
 
 (defn lusers [context args]
   (let [users (st/user-count)
@@ -48,14 +53,16 @@
     (send-numeric context "250" [(s/join ["Highest connection count: "
                                           (st/max-connection-count) " ("
                                           max-clients " clients) ("
-                                          @st/client-id " connections received)"])])))
+                                          (st/total-connection-count)
+                                          " connections received)"])])))
 
 (defn motd [context args]
   (doall (map #(send-numeric context "372" [(s/join ["- " %])]) (cfg/motd-lines)))
   (send-numeric context "376" ["End of /MOTD command."]))
 
-(defn register [{:keys [id] :as context} identifier]
-  (let [welcome [(s/join ["Welcome to the Internet Relay Network " identifier])]
+(defn register [{:keys [id] :as context}]
+  (let [identifier (user-prefix context)
+        welcome [(s/join ["Welcome to the Internet Relay Network " identifier])]
         server-id [(s/join ["Your host is " (cfg/server-name)
                            " running " (cfg/version)])]
         start-time [(s/join ["This server was created " (cfg/startup-time)])]
@@ -83,10 +90,11 @@
 (defn check-registered [{:keys [id channel] :as context}]
   (let [{:keys [nick user address registered] :as record} (st/client-record id)]
     (if (and nick user address (not registered))
-      (register context (s/join [nick \! user \@ address])))))
+      (register context))))
 
 (defn user [{:keys [id] :as context} [c user host server real]]
   (st/update-client id [:user] (fn [_] user))
+  (st/update-client id [:real] (fn [_] real))
   (check-registered context)
   (println "User:" user))
 
@@ -99,7 +107,75 @@
   (println "Quit:" message))
 
 (defn ping [{:keys [channel] :as context} [c tag]]
-  (send-message context (cfg/server-name) "PONG" (cfg/server-name) [tag]))
+  (send-message context (cfg/server-name) "PONG" [(cfg/server-name) tag]))
+
+(defn mode-numeric [context chan]
+  (let [record (st/channel-record chan)
+        modes (:modes record)
+        mode-string (s/join (cons \+ modes))]
+    (send-numeric context "324" [chan mode-string])
+    (send-numeric context "329" [chan (str (:created record))])))
+
+(defn mode [{:keys [id] :as context} [c chan modes & args]]
+  (let [record (st/channel-record chan)]
+    (if modes
+      (println modes args)
+      (mode-numeric context chan))))
+
+(defn mode-char [modes]
+  (if (contains? modes \o) \@
+    (if (contains? modes \v) \+
+      "")))
+
+(defn names [context [c chan]]
+  (let [record (st/channel-record chan)]
+    (if (nil? record)
+      (send-numeric context "403" [chan "No such channel"])
+      (let [memberships (:members record)
+            membership-string-parts (map (juxt (comp mode-char :modes)
+                                               (comp nick-of :id))
+                                         memberships)
+            members (s/join " " (map s/join membership-string-parts))]
+        (send-numeric context "353" ["=" chan members])
+        (send-numeric context "366" ["End of /NAMES list."])))))
+
+(defn send-who-response [context chan membership]
+  (let [{:keys [nick user address server
+                away hops real]} (st/user-record (:id membership))
+        status (s/join [(if away \G \H)
+                        (mode-char (:modes membership))])]
+        (send-numeric context "352" [chan user address server nick status
+                                     (s/join " " [hops real])])))
+
+(defn who-chan [context [c chan]]
+  (let [record (st/channel-record chan)]
+    (if record (doall (map
+                        #(send-who-response context chan %)
+                        (:members record))))))
+
+(defn who [context [c match]]
+  (if (= \# (first match))
+    (who-chan context [c match]))
+  (send-numeric context "315" ["End of /WHO list."]))
+
+(defn topic [context [c chan text]]
+  (let [record (st/channel-record chan)
+        current (:topic record)]
+    (if text
+      (println "new topic:" text)
+      (if current
+        (send-numeric context "332" [chan current])
+        (send-numeric context "331" [chan "No topic is set"])))))
+
+(defn cmd-join [{:keys [id] :as context} [c chan]]
+  (let [{:keys [nick user address] :as record} (st/client-record id)
+        prefix (s/join [nick \! user \@ address])]
+    (st/join-channel id chan)
+    (send-message context prefix "JOIN" [chan])
+    (topic context ["TOPIC" chan])
+    (mode-numeric context chan)
+    (names context ["NAMES" chan])
+    (println prefix "Join:" chan)))
 
 (defn unknown-command [context [c & args]]
   (println "Got unknown command:" c))
@@ -112,4 +188,9 @@
     "LUSERS" lusers
     "MOTD" motd
     "PING" ping
+    "JOIN" cmd-join
+    "MODE" mode
+    "NAMES" names
+    "WHO" who
+    "TOPIC" topic
     unknown-command))
