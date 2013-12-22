@@ -12,14 +12,17 @@
   (let [nick (:nick (st/client-record id))]
     (if nick nick "*")))
 
-(defn send-numeric [{:keys [id channel] :as context} numeric args]
-  (let [target (nick-of id)
-        trail (last args)
+(defn send-message [{:keys [id channel] :as context} source command target args]
+  (let [trail (last args)
         args (butlast args)
-        reply [(server-prefix) numeric target]
+        source-prefix (s/join [\: source])
+        reply [source-prefix command target]
         reply (if (empty? args) reply (apply conj reply args))
         reply (conj reply (if (.contains trail " ") (s/join [\: trail]) trail))]
     (enqueue channel (s/join " " reply))))
+
+(defn send-numeric [{:keys [id] :as context} numeric args]
+  (send-message context (cfg/server-name) numeric (nick-of id) args))
 
 (defn lusers [context args]
   (let [users (st/user-count)
@@ -95,6 +98,9 @@
 (defn quit [context [c message]]
   (println "Quit:" message))
 
+(defn ping [{:keys [channel] :as context} [c tag]]
+  (send-message context (cfg/server-name) "PONG" (cfg/server-name) [tag]))
+
 (defn unknown-command [context [c & args]]
   (println "Got unknown command:" c))
 
@@ -105,4 +111,5 @@
     "QUIT" quit
     "LUSERS" lusers
     "MOTD" motd
+    "PING" ping
     unknown-command))
